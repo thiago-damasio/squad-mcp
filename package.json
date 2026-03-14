@@ -1,23 +1,29 @@
 {
   "name": "squad-mcp",
-  "version": "1.0.0",
-  "description": "MCP Orchestrator Server for multi-agent coordination with Claude Code + git worktrees",
+  "version": "2.0.0",
+  "description": "Multi-agent coordination for Claude Code — skill-first architecture with optional MCP server addon",
   "type": "module",
-  "main": "src/server.js",
   "bin": {
     "squad": "./bin/squad.js"
   },
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
-    "install-global": "npm link"
+    "install-global": "npm link",
+    "serve": "node src/addon/server.js"
   },
-  "keywords": ["mcp", "orchestrator", "multi-agent", "claude-code"],
+  "keywords": ["claude-code", "multi-agent", "orchestrator", "skill", "mcp", "coordination"],
   "license": "MIT",
+  "files": [
+    "bin/",
+    "skill/",
+    "hooks/",
+    "schema/",
+    "src/addon/"
+  ],
   "dependencies": {
+    "commander": "^13.0.0"
+  },
+  "optionalDependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0",
-    "better-sqlite3": "^11.0.0",
-    "commander": "^13.0.0",
     "express": "^5.1.0",
     "zod": "^3.25.0"
   }

@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "squad-mcp state",
+  "description": "State file for squad-mcp multi-agent coordination",
+  "type": "object",
+  "required": ["version", "project", "updated_at", "epics", "tasks"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version for future migrations"
+    },
+    "project": {
+      "type": "string",
+      "description": "Project name"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Last modification timestamp (ISO 8601)"
+    },
+    "epics": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/epic"
+      },
+      "description": "Epics keyed by name"
+    },
+    "tasks": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/task"
+      },
+      "description": "Tasks keyed by name (name = ID)"
+    },
+    "sessions": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/session"
+      },
+      "description": "Active sessions keyed by session_id (used by MCP addon)"
+    }
+  },
+  "$defs": {
+    "epic": {
+      "type": "object",
+      "required": ["description", "created_at"],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "required": ["status", "description", "files_scope", "depends_on"],
+      "properties": {
+        "epic": {
+          "type": ["string", "null"],
+          "description": "Epic this task belongs to"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "STARTED", "IN_PROGRESS", "BLOCKED", "COMPLETE", "CANCELLED"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable task summary"
+        },
+        "files_scope": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Files this task will touch"
+        },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Task names that must be COMPLETE before this task can start"
+        },
+        "agent_context": {
+          "$ref": "#/$defs/agent_context"
+        },
+        "assigned_to": {
+          "type": ["string", "null"],
+          "description": "Session or agent ID that claimed this task"
+        },
+        "started_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "summary": {
+          "type": ["string", "null"],
+          "description": "Completion summary written by the agent"
+        }
+      }
+    },
+    "agent_context": {
+      "type": "object",
+      "description": "Structured context for generating agent prompts — the key differentiator",
+      "required": ["objective"],
+      "properties": {
+        "objective": {
+          "type": "string",
+          "description": "What the agent must accomplish (1-2 sentences)"
+        },
+        "key_files": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Map of file path -> annotation explaining what to do with it"
+        },
+        "implementation_hints": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered steps or tips for the agent"
+        },
+        "verification": {
+          "type": "string",
+          "description": "Command(s) to run to verify the work is correct"
+        },
+        "commit_convention": {
+          "type": "string",
+          "description": "Commit message format (e.g., 'feat(auth): <description>')"
+        },
+        "closes_issue": {
+          "type": ["string", "null"],
+          "description": "GitHub issue reference (e.g., '#42')"
+        }
+      }
+    },
+    "session": {
+      "type": "object",
+      "properties": {
+        "worktree": { "type": "string" },
+        "current_task": { "type": ["string", "null"] },
+        "last_seen_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

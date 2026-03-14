@@ -1,301 +1,342 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, appendFileSync, openSync, unlinkSync } from 'node:fs';
-import { join, dirname, resolve } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, openSync, unlinkSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
-import { initDb, SQUAD_DIR, LOG_PATH } from '../src/db.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SERVER_PATH = join(__dirname, '..', 'src', 'server.js');
-const PID_FILE = join(SQUAD_DIR, 'squad.pid');
+const STATE_FILE = '.squad/state.json';
+const SKILL_SOURCE = join(__dirname, '..', 'skill', 'squad.md');
+const ADDON_SERVER = join(__dirname, '..', 'src', 'addon', 'server.js');
+const SQUAD_HOME = join(homedir(), '.squad-mcp');
+const PID_FILE = join(SQUAD_HOME, 'squad.pid');
+const LOG_PATH = join(SQUAD_HOME, 'squad.log');
 const DEFAULT_PORT = parseInt(process.env.SQUAD_PORT || '3456', 10);
+
+function findStateFile() {
+  let dir = process.cwd();
+  while (dir !== dirname(dir)) {
+    const candidate = join(dir, STATE_FILE);
+    if (existsSync(candidate)) return candidate;
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+function loadState() {
+  const path = findStateFile();
+  if (!path) {
+    console.error('No .squad/state.json found. Run "squad init" first.');
+    process.exit(1);
+  }
+  return JSON.parse(readFileSync(path, 'utf-8'));
+}
+
+const STATUS_ICON = {
+  PENDING: '[ ]',
+  STARTED: '[>]',
+  IN_PROGRESS: '[~]',
+  BLOCKED: '[!]',
+  COMPLETE: '[x]',
+  CANCELLED: '[-]',
+};
 
 const program = new Command();
 
 program
   .name('squad')
-  .description('Squad MCP — Multi-agent coordination server')
-  .version('1.0.0');
+  .description('Squad — Multi-agent coordination for Claude Code')
+  .version('2.0.0');
 
-// --- start ---
+// --- init ---
 program
-  .command('start')
-  .description('Start the squad-mcp server in background')
-  .option('-p, --port <port>', 'Server port', String(DEFAULT_PORT))
+  .command('init')
+  .description('Initialize squad coordination in the current project')
+  .option('--with-hooks', 'Also configure Claude Code post-agent hook')
+  .option('--with-server', 'Also configure MCP addon server for multi-session coordination')
   .action((opts) => {
-    if (existsSync(PID_FILE)) {
-      const pid = readFileSync(PID_FILE, 'utf-8').trim();
-      try {
-        process.kill(parseInt(pid), 0);
-        console.log(`squad-mcp already running (PID ${pid})`);
-        return;
-      } catch {
-        // Stale PID file
+    const cwd = process.cwd();
+    const squadDir = join(cwd, '.squad');
+    const statePath = join(cwd, STATE_FILE);
+    const gitignorePath = join(cwd, '.gitignore');
+    const skillTarget = join(cwd, '.claude', 'commands', 'squad.md');
+
+    // 1. Create .squad/state.json
+    if (!existsSync(squadDir)) {
+      mkdirSync(squadDir, { recursive: true });
+    }
+
+    if (existsSync(statePath)) {
+      console.log('.squad/state.json already exists, skipping.');
+    } else {
+      const projectName = JSON.parse(
+        existsSync(join(cwd, 'package.json'))
+          ? readFileSync(join(cwd, 'package.json'), 'utf-8')
+          : '{"name":"project"}'
+      ).name || 'project';
+
+      const initialState = {
+        version: 1,
+        project: projectName,
+        updated_at: new Date().toISOString(),
+        epics: {},
+        tasks: {},
+        sessions: {},
+      };
+
+      writeFileSync(statePath, JSON.stringify(initialState, null, 2) + '\n');
+      console.log(`Created ${STATE_FILE}`);
+    }
+
+    // 2. Add .squad/ to .gitignore
+    if (existsSync(gitignorePath)) {
+      const content = readFileSync(gitignorePath, 'utf-8');
+      if (!content.includes('.squad/')) {
+        writeFileSync(gitignorePath, content.trimEnd() + '\n.squad/\n');
+        console.log('Added .squad/ to .gitignore');
+      }
+    } else {
+      writeFileSync(gitignorePath, '.squad/\n');
+      console.log('Created .gitignore with .squad/');
+    }
+
+    // 3. Copy skill to .claude/commands/
+    const skillDir = dirname(skillTarget);
+    if (!existsSync(skillDir)) {
+      mkdirSync(skillDir, { recursive: true });
+    }
+
+    if (existsSync(SKILL_SOURCE)) {
+      copyFileSync(SKILL_SOURCE, skillTarget);
+      console.log(`Installed skill to .claude/commands/squad.md`);
+    } else {
+      console.log('Warning: skill source not found. Install squad-mcp globally or copy skill/squad.md manually.');
+    }
+
+    // 4. Optional: configure hook
+    if (opts.withHooks) {
+      const settingsPath = join(cwd, '.claude', 'settings.json');
+      let settings = {};
+      if (existsSync(settingsPath)) {
+        try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')); } catch {}
+      }
+
+      if (!settings.hooks) settings.hooks = {};
+      if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
+
+      const hasHook = settings.hooks.PostToolUse.some(
+        h => h.command && h.command.includes('squad-hook')
+      );
+
+      if (!hasHook) {
+        settings.hooks.PostToolUse.push({
+          matcher: 'Agent',
+          command: 'squad-hook post-agent',
+        });
+        mkdirSync(dirname(settingsPath), { recursive: true });
+        writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+        console.log('Configured post-agent hook in .claude/settings.json');
       }
     }
 
-    const logFd = openSync(LOG_PATH, 'a');
-    const child = spawn('node', [SERVER_PATH], {
-      env: { ...process.env, SQUAD_PORT: opts.port },
-      detached: true,
-      stdio: ['ignore', logFd, logFd],
-    });
+    // 5. Optional: configure MCP addon server
+    if (opts.withServer) {
+      const mcpJsonPath = join(cwd, '.mcp.json');
+      let mcpConfig = {};
+      if (existsSync(mcpJsonPath)) {
+        try { mcpConfig = JSON.parse(readFileSync(mcpJsonPath, 'utf-8')); } catch {}
+      }
 
-    writeFileSync(PID_FILE, String(child.pid));
-    child.unref();
-    console.log(`squad-mcp started on port ${opts.port} (PID ${child.pid})`);
-    console.log(`Logs: ${LOG_PATH}`);
+      if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+      mcpConfig.mcpServers['squad-mcp'] = {
+        type: 'http',
+        url: `http://127.0.0.1:${DEFAULT_PORT}/mcp`,
+      };
+
+      writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + '\n');
+      console.log(`Configured MCP addon in .mcp.json (port ${DEFAULT_PORT})`);
+      console.log('Start the server with: squad serve');
+    }
+
+    console.log('\nReady! Use "/squad" in Claude Code to start coordinating.');
+  });
+
+// --- board ---
+program
+  .command('board')
+  .description('Show kanban board')
+  .argument('[epic]', 'Filter by epic name')
+  .action((epicFilter) => {
+    const state = loadState();
+    const tasks = state.tasks;
+    const entries = Object.entries(tasks);
+
+    if (entries.length === 0) {
+      console.log('No tasks found.');
+      return;
+    }
+
+    // Group by epic if showing all
+    const epics = new Set(entries.map(([, t]) => t.epic).filter(Boolean));
+
+    // Show epic progress
+    for (const epicName of epics) {
+      if (epicFilter && epicName !== epicFilter) continue;
+      const epicTasks = entries.filter(([, t]) => t.epic === epicName);
+      const complete = epicTasks.filter(([, t]) => t.status === 'COMPLETE').length;
+      console.log(`\n=== Epic: ${epicName} (${complete}/${epicTasks.length} complete) ===`);
+    }
+
+    // Group by status
+    const columns = {};
+    for (const [name, task] of entries) {
+      if (epicFilter && task.epic !== epicFilter) continue;
+      if (!columns[task.status]) columns[task.status] = [];
+      columns[task.status].push({ name, ...task });
+    }
+
+    const order = ['PENDING', 'STARTED', 'IN_PROGRESS', 'BLOCKED', 'COMPLETE', 'CANCELLED'];
+    for (const status of order) {
+      const items = columns[status];
+      if (!items || items.length === 0) continue;
+
+      console.log(`\n${status} (${items.length})`);
+      for (const t of items) {
+        const icon = STATUS_ICON[status];
+        const epic = t.epic ? ` (${t.epic})` : '';
+        const assigned = t.assigned_to ? ` [${t.assigned_to}]` : '';
+
+        // Show blocking deps for PENDING tasks
+        let blocked = '';
+        if (status === 'PENDING' && t.depends_on && t.depends_on.length > 0) {
+          const unmet = t.depends_on.filter(d => tasks[d]?.status !== 'COMPLETE');
+          if (unmet.length > 0) {
+            blocked = `  <- blocked by: ${unmet.join(', ')}`;
+          }
+        }
+
+        console.log(`  ${icon} ${t.name}${epic}${assigned}${blocked}`);
+      }
+    }
+  });
+
+// --- graph ---
+program
+  .command('graph')
+  .description('Show dependency graph')
+  .argument('[epic]', 'Filter by epic name')
+  .action((epicFilter) => {
+    const state = loadState();
+    const entries = Object.entries(state.tasks);
+
+    if (entries.length === 0) {
+      console.log('No tasks found.');
+      return;
+    }
+
+    for (const [name, task] of entries) {
+      if (epicFilter && task.epic !== epicFilter) continue;
+      const icon = STATUS_ICON[task.status] || '[?]';
+      const deps = task.depends_on && task.depends_on.length > 0
+        ? ` <-- ${task.depends_on.join(', ')}`
+        : '';
+      console.log(`${icon} ${name}${deps}`);
+    }
+  });
+
+// --- status ---
+program
+  .command('status')
+  .description('Show summary of all epics')
+  .action(() => {
+    const state = loadState();
+    const entries = Object.entries(state.tasks);
+
+    if (entries.length === 0) {
+      console.log('No tasks.');
+      return;
+    }
+
+    // Group by epic
+    const byEpic = {};
+    for (const [name, task] of entries) {
+      const epic = task.epic || '(no epic)';
+      if (!byEpic[epic]) byEpic[epic] = { total: 0, complete: 0, in_progress: 0, blocked: 0 };
+      byEpic[epic].total++;
+      if (task.status === 'COMPLETE') byEpic[epic].complete++;
+      if (task.status === 'IN_PROGRESS' || task.status === 'STARTED') byEpic[epic].in_progress++;
+      if (task.status === 'BLOCKED') byEpic[epic].blocked++;
+    }
+
+    for (const [epic, counts] of Object.entries(byEpic)) {
+      const pct = Math.round((counts.complete / counts.total) * 100);
+      const parts = [`${counts.complete}/${counts.total} complete (${pct}%)`];
+      if (counts.in_progress > 0) parts.push(`${counts.in_progress} in progress`);
+      if (counts.blocked > 0) parts.push(`${counts.blocked} blocked`);
+      console.log(`${epic}: ${parts.join(', ')}`);
+    }
+  });
+
+// --- serve (MCP addon) ---
+program
+  .command('serve')
+  .description('Start the MCP addon server for multi-session coordination')
+  .option('-p, --port <port>', 'Server port', String(DEFAULT_PORT))
+  .option('-d, --daemon', 'Run in background')
+  .action((opts) => {
+    if (opts.daemon) {
+      if (existsSync(PID_FILE)) {
+        const pid = readFileSync(PID_FILE, 'utf-8').trim();
+        try {
+          process.kill(parseInt(pid), 0);
+          console.log(`squad-mcp addon already running (PID ${pid})`);
+          return;
+        } catch {
+          // Stale PID
+        }
+      }
+
+      mkdirSync(SQUAD_HOME, { recursive: true });
+      const logFd = openSync(LOG_PATH, 'a');
+      const child = spawn('node', [ADDON_SERVER], {
+        env: { ...process.env, SQUAD_PORT: opts.port },
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
+      });
+
+      writeFileSync(PID_FILE, String(child.pid));
+      child.unref();
+      console.log(`squad-mcp addon started on port ${opts.port} (PID ${child.pid})`);
+      console.log(`Logs: ${LOG_PATH}`);
+    } else {
+      // Foreground mode — just import and run
+      process.env.SQUAD_PORT = opts.port;
+      import(ADDON_SERVER);
+    }
   });
 
 // --- stop ---
 program
   .command('stop')
-  .description('Stop the squad-mcp server')
+  .description('Stop the MCP addon server')
   .action(() => {
     if (!existsSync(PID_FILE)) {
-      console.log('squad-mcp is not running');
+      console.log('squad-mcp addon is not running.');
       return;
     }
 
     const pid = parseInt(readFileSync(PID_FILE, 'utf-8').trim());
     try {
       process.kill(pid, 'SIGTERM');
-      console.log(`squad-mcp stopped (PID ${pid})`);
+      console.log(`squad-mcp addon stopped (PID ${pid})`);
     } catch {
-      console.log('squad-mcp process not found (stale PID)');
+      console.log('Process not found (stale PID).');
     }
 
     try { unlinkSync(PID_FILE); } catch {}
-  });
-
-// --- status ---
-program
-  .command('status')
-  .description('Show server status and summary')
-  .action(() => {
-    const db = initDb();
-    const projects = db.prepare('SELECT name FROM projects').all();
-    const tasks = db.prepare('SELECT status, COUNT(*) as count FROM tasks GROUP BY status').all();
-    const sessions = db.prepare('SELECT COUNT(*) as count FROM sessions').get();
-
-    let running = false;
-    if (existsSync(PID_FILE)) {
-      const pid = parseInt(readFileSync(PID_FILE, 'utf-8').trim());
-      try { process.kill(pid, 0); running = true; } catch {}
-    }
-
-    console.log(`Server: ${running ? 'RUNNING' : 'STOPPED'}`);
-    console.log(`Projects: ${projects.map(p => p.name).join(', ') || '(none)'}`);
-    console.log(`Sessions: ${sessions.count}`);
-    console.log('\nTasks:');
-    if (tasks.length === 0) {
-      console.log('  (none)');
-    } else {
-      for (const t of tasks) {
-        console.log(`  ${t.status}: ${t.count}`);
-      }
-    }
-
-    db.close();
-  });
-
-// --- board ---
-program
-  .command('board')
-  .description('Show kanban board in the terminal')
-  .argument('[project]', 'Filter by project name')
-  .action((project) => {
-    const db = initDb();
-
-    let query = `
-      SELECT t.name, t.status, t.session_id, p.name as project_name, e.name as epic_name
-      FROM tasks t
-      JOIN projects p ON t.project_id = p.id
-      LEFT JOIN epics e ON t.epic_id = e.id
-    `;
-    const params = [];
-    if (project) {
-      query += ' WHERE p.name = ?';
-      params.push(project);
-    }
-    query += ' ORDER BY t.created_at';
-
-    const tasks = db.prepare(query).all(...params);
-
-    const columns = { PENDING: [], STARTED: [], IN_PROGRESS: [], BLOCKED: [], COMPLETE: [], CANCELLED: [] };
-    for (const t of tasks) {
-      columns[t.status].push(t);
-    }
-
-    for (const [status, items] of Object.entries(columns)) {
-      if (items.length === 0) continue;
-      console.log(`\n=== ${status} (${items.length}) ===`);
-      for (const t of items) {
-        const owner = t.session_id ? ` [${t.session_id.slice(0, 8)}]` : '';
-        const epic = t.epic_name ? ` (${t.epic_name})` : '';
-        console.log(`  ${t.name}${epic}${owner}`);
-      }
-    }
-
-    if (tasks.length === 0) {
-      console.log('No tasks found.');
-    }
-
-    db.close();
-  });
-
-// --- ps ---
-program
-  .command('ps')
-  .description('List active sessions/worktrees')
-  .action(() => {
-    const db = initDb();
-
-    const sessions = db.prepare(`
-      SELECT s.session_id, s.worktree, s.project, s.last_seen_at,
-             t.name as current_task
-      FROM sessions s
-      LEFT JOIN tasks t ON t.session_id = s.session_id
-        AND t.status IN ('STARTED', 'IN_PROGRESS')
-      ORDER BY s.last_seen_at DESC
-    `).all();
-
-    if (sessions.length === 0) {
-      console.log('No active sessions.');
-    } else {
-      for (const s of sessions) {
-        const task = s.current_task ? ` -> ${s.current_task}` : '';
-        console.log(`  ${s.session_id.slice(0, 8)} | ${s.project || '?'} | ${s.worktree || '?'}${task}`);
-      }
-    }
-
-    db.close();
-  });
-
-// --- graph ---
-program
-  .command('graph')
-  .description('Print ASCII dependency graph')
-  .argument('[project]', 'Filter by project name')
-  .action((project) => {
-    const db = initDb();
-
-    let query = `
-      SELECT t.name, t.status, dep.name as depends_on
-      FROM tasks t
-      LEFT JOIN task_dependencies td ON td.task_id = t.id
-      LEFT JOIN tasks dep ON td.depends_on_task_id = dep.id
-      JOIN projects p ON t.project_id = p.id
-    `;
-    const params = [];
-    if (project) {
-      query += ' WHERE p.name = ?';
-      params.push(project);
-    }
-    query += ' ORDER BY t.name';
-
-    const rows = db.prepare(query).all(...params);
-
-    const tasks = new Map();
-    for (const row of rows) {
-      if (!tasks.has(row.name)) {
-        tasks.set(row.name, { status: row.status, deps: [] });
-      }
-      if (row.depends_on) {
-        tasks.get(row.name).deps.push(row.depends_on);
-      }
-    }
-
-    const statusIcon = {
-      PENDING: '[ ]', STARTED: '[>]', IN_PROGRESS: '[~]',
-      BLOCKED: '[!]', COMPLETE: '[x]', CANCELLED: '[-]',
-    };
-
-    if (tasks.size === 0) {
-      console.log('No tasks found.');
-    } else {
-      for (const [name, info] of tasks) {
-        const icon = statusIcon[info.status] || '[?]';
-        const depStr = info.deps.length > 0 ? ` <-- ${info.deps.join(', ')}` : '';
-        console.log(`${icon} ${name}${depStr}`);
-      }
-    }
-
-    db.close();
-  });
-
-// --- init ---
-program
-  .command('init')
-  .description('Initialize squad-mcp in the current project')
-  .option('-p, --port <port>', 'Server port', String(DEFAULT_PORT))
-  .action((opts) => {
-    const cwd = process.cwd();
-    const mcpJsonPath = join(cwd, '.mcp.json');
-    const claudeMdPath = join(cwd, 'CLAUDE.md');
-
-    // 1. Create/update .mcp.json
-    let mcpConfig = {};
-    if (existsSync(mcpJsonPath)) {
-      try {
-        mcpConfig = JSON.parse(readFileSync(mcpJsonPath, 'utf-8'));
-      } catch {}
-    }
-
-    if (!mcpConfig.mcpServers) {
-      mcpConfig.mcpServers = {};
-    }
-
-    mcpConfig.mcpServers['squad-mcp'] = {
-      type: 'http',
-      url: `http://127.0.0.1:${opts.port}/mcp`,
-    };
-
-    writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + '\n');
-    console.log(`Created/updated ${mcpJsonPath}`);
-
-    // 2. Add Squad Orchestration Protocol to CLAUDE.md
-    const squadBlock = `
-## Squad Orchestration Protocol
-
-This project uses squad-mcp for multi-agent coordination. All sessions MUST follow this protocol.
-
-### Before any implementation:
-1. Call \`check_conflicts\` with the files you intend to touch
-2. Call \`check_dependencies\` to verify no blockers
-3. If CONFLICT or WAITING -> report to user, do NOT proceed without explicit instruction
-4. If CLEAR -> call \`register_task\` + \`claim_task\`, then implement
-5. On completion -> call \`update_task_status\` with COMPLETE and a summary
-
-### Session startup:
-1. Call \`list_active_sessions\` to orient yourself
-2. If tech-lead: call \`get_board\` and \`get_dependency_graph\`
-3. If dev: call \`get_board\` to see available PENDING tasks
-
-### Roles:
-- **tech-lead**: plans epics, creates tasks, monitors board, resolves conflicts
-- **dev**: implements tasks, respects file scope, reports status
-- **reviewer**: read-only, validates implementations
-- **qa**: runs tests, marks tasks BLOCKED if tests fail
-`;
-
-    if (existsSync(claudeMdPath)) {
-      const content = readFileSync(claudeMdPath, 'utf-8');
-      if (content.includes('Squad Orchestration Protocol')) {
-        console.log('CLAUDE.md already has Squad Orchestration Protocol block');
-      } else {
-        appendFileSync(claudeMdPath, '\n' + squadBlock);
-        console.log(`Appended Squad Orchestration Protocol to ${claudeMdPath}`);
-      }
-    } else {
-      writeFileSync(claudeMdPath, `# Project\n${squadBlock}`);
-      console.log(`Created ${claudeMdPath} with Squad Orchestration Protocol`);
-    }
-
-    console.log('\nDone! Make sure the squad-mcp server is running: squad start');
   });
 
 program.parse();
