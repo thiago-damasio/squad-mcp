@@ -128,13 +128,13 @@ program
       if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
 
       const hasHook = settings.hooks.PostToolUse.some(
-        h => h.command && h.command.includes('squad-hook')
+        h => h.hooks && h.hooks.some(hk => hk.command && hk.command.includes('squad-hook'))
       );
 
       if (!hasHook) {
         settings.hooks.PostToolUse.push({
           matcher: 'Agent',
-          command: 'squad-hook post-agent',
+          hooks: [{ type: 'command', command: 'squad-hook post-agent' }],
         });
         mkdirSync(dirname(settingsPath), { recursive: true });
         writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
