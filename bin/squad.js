@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, openSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, openSync, unlinkSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -10,6 +10,7 @@ import { homedir } from 'node:os';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = '.squad/state.json';
 const SKILL_SOURCE = join(__dirname, '..', 'skill', 'squad.md');
+const HOOK_SOURCE = join(__dirname, '..', 'hooks', 'post-agent.sh');
 const ADDON_SERVER = join(__dirname, '..', 'src', 'addon', 'server.js');
 const SQUAD_HOME = join(homedir(), '.squad-mcp');
 const PID_FILE = join(SQUAD_HOME, 'squad.pid');
@@ -127,17 +128,32 @@ program
       if (!settings.hooks) settings.hooks = {};
       if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
 
+      // Copy hook script to .claude/hooks/
+      const hookTarget = join(cwd, '.claude', 'hooks', 'squad-post-agent.sh');
+      const hookDir = dirname(hookTarget);
+      if (!existsSync(hookDir)) {
+        mkdirSync(hookDir, { recursive: true });
+      }
+
+      if (existsSync(HOOK_SOURCE)) {
+        copyFileSync(HOOK_SOURCE, hookTarget);
+        chmodSync(hookTarget, 0o755);
+      }
+
+      const hookCommand = '"$CLAUDE_PROJECT_DIR"/.claude/hooks/squad-post-agent.sh';
+
       const hasHook = settings.hooks.PostToolUse.some(
-        h => h.hooks && h.hooks.some(hk => hk.command && hk.command.includes('squad-hook'))
+        h => h.hooks && h.hooks.some(hk => hk.command && hk.command.includes('squad-post-agent'))
       );
 
       if (!hasHook) {
         settings.hooks.PostToolUse.push({
           matcher: 'Agent',
-          hooks: [{ type: 'command', command: 'squad-hook post-agent' }],
+          hooks: [{ type: 'command', command: hookCommand }],
         });
         mkdirSync(dirname(settingsPath), { recursive: true });
         writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+        console.log(`Installed hook to .claude/hooks/squad-post-agent.sh`);
         console.log('Configured post-agent hook in .claude/settings.json');
       }
     }
